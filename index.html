@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Lola's Commute</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #000;
+      overflow: hidden;
+      touch-action: none;
+    }
+    #game-scaler {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 300px;
+      height: 500px;
+      transform-origin: center center;
+      overflow: hidden;
+    }
+    #loading-screen {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 18px;
+      letter-spacing: 1px;
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0px); }
+      50% { transform: translateY(-12px); }
+    }
+    .float {
+      animation: float 2.8s ease-in-out infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading-screen">Loading...</div>
+  <div id="game-scaler"><div id="game-container"></div></div>
+  <script src="elm.9f88249d.js"></script>
+  <script>
+    (function() {
+      // Preload all game images before starting
+      var imagePaths = [
+        'assets/background.png',
+        'assets/character.png',
+        'assets/coin.png',
+        'assets/fire-hydrant.png',
+        'assets/player.gif',
+        'assets/roadloop.png',
+        'assets/start-button.png',
+        'assets/title.png'
+      ];
+
+      function preloadImages(paths) {
+        return Promise.all(paths.map(function(path) {
+          return new Promise(function(resolve) {
+            var img = new Image();
+            img.onload = resolve;
+            img.onerror = resolve; // don't block on missing images
+            img.src = path;
+          });
+        }));
+      }
+
+      var scaler = document.getElementById('game-scaler');
+      var container = document.getElementById('game-container');
+      var loadingScreen = document.getElementById('loading-screen');
+      var GAME_W = 300;
+      var GAME_H = 500;
+      var scaleFactor = 1;
+
+      function resize() {
+        var vw = window.innerWidth;
+        var vh = window.innerHeight;
+        var padding = 20;
+        var availableW = Math.max(0, vw - padding);
+        var availableH = Math.max(0, vh - padding);
+        scaleFactor = Math.min(availableH / GAME_H, availableW / GAME_W);
+        scaler.style.transform =
+          'translate(-50%, -50%) scale(' + scaleFactor + ')';
+      }
+
+      resize();
+      window.addEventListener('resize', resize);
+
+      // Hide game until images are loaded
+      scaler.style.visibility = 'hidden';
+
+      var MAX_LOAD_MS = 30000;
+      var loadTimeout = new Promise(function(_, reject) {
+        setTimeout(function() { reject(new Error('timeout')); }, MAX_LOAD_MS);
+      });
+
+      Promise.race([preloadImages(imagePaths), loadTimeout]).then(function() {
+        loadingScreen.style.display = 'none';
+        scaler.style.visibility = 'visible';
+      }).catch(function() {
+        loadingScreen.textContent = "Couldn't load game. Check your internet connection.";
+      });
+
+      var tutorialSeen = (function() {
+        try { return localStorage.getItem('tutorialComplete') === '1'; } catch (_) { return false; }
+      })();
+      var app = Elm.Main.init({ node: container, flags: tutorialSeen });
+
+      function triggerJiggle(e) {
+        var el = e.target.closest('[data-jiggle]');
+        if (!el) return;
+        el.animate([
+          { rotate: '0deg' },
+          { rotate: '-8deg' },
+          { rotate: '8deg' },
+          { rotate: '-4deg' },
+          { rotate: '0deg' }
+        ], { duration: 400, easing: 'ease' });
+      }
+
+      // Touch controls: tap left/right half to move lanes
+      scaler.addEventListener('touchstart', function(e) {
+        triggerJiggle(e);
+        if (e.target.closest('button, a, [role="button"]')) {
+          return;
+        }
+        e.preventDefault();
+        var touch = e.touches[0];
+        var rect = scaler.getBoundingClientRect();
+        var x = touch.clientX - rect.left;
+        var mid = rect.width / 2;
+        if (x < mid) {
+          app.ports.onTouchLane.send(-1);
+        } else {
+          app.ports.onTouchLane.send(1);
+        }
+      }, { passive: false });
+
+      // Mouse controls: click left/right half to move lanes (for desktop testing)
+      scaler.addEventListener('click', function(e) {
+        triggerJiggle(e);
+        if (e.target.closest('button, a, [role="button"]')) {
+          return;
+        }
+        var rect = scaler.getBoundingClientRect();
+        var x = e.clientX - rect.left;
+        var mid = rect.width / 2;
+        if (x < mid) {
+          app.ports.onTouchLane.send(-1);
+        } else {
+          app.ports.onTouchLane.send(1);
+        }
+      });
+
+      // Keyboard controls: arrow keys (for desktop testing)
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'ArrowLeft') {
+          app.ports.onTouchLane.send(-1);
+        } else if (e.key === 'ArrowRight') {
+          app.ports.onTouchLane.send(1);
+        } else if (e.key === '`') {
+          app.ports.onToggleDebug.send(null);
+        }
+      });
+
+      // Share score: handle outbound port
+      app.ports.shareScore.subscribe(function(score) {
+        // Navigate to the custom scheme the iOS WKNavigationDelegate intercepts
+        window.location.href = 'life360-game://result?score=' + score;
+      });
+
+      // Tutorial complete: persist to localStorage
+      app.ports.markTutorialSeen.subscribe(function() {
+        try { localStorage.setItem('tutorialComplete', '1'); } catch (_) {}
+      });
+
+      // Sound effects via Web Audio API (low-latency, supports overlapping plays)
+      var audioCtx = null;
+      var sfxBuffers = { coin: null, hurt: null };
+      var sfxMuted = false;
+
+      function initAudioCtx() {
+        if (audioCtx) return;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+
+      function loadSfx(url, key, volume) {
+        fetch(url)
+          .then(function(r) { return r.arrayBuffer(); })
+          .then(function(buf) {
+            initAudioCtx();
+            return audioCtx.decodeAudioData(buf);
+          })
+          .then(function(decoded) {
+            sfxBuffers[key] = { buffer: decoded, volume: volume };
+          })
+          .catch(function() {});
+      }
+
+      loadSfx('assets/lola-coin.mp3', 'coin', 0.5);
+      loadSfx('assets/lola-hurt.mp3', 'hurt', 1.0);
+
+      function playSfx(key) {
+        if (sfxMuted || !audioCtx || !sfxBuffers[key]) return;
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        var src = audioCtx.createBufferSource();
+        src.buffer = sfxBuffers[key].buffer;
+        var gain = audioCtx.createGain();
+        gain.gain.value = sfxBuffers[key].volume;
+        src.connect(gain);
+        gain.connect(audioCtx.destination);
+        src.start(0);
+      }
+
+      app.ports.playCoinSound.subscribe(function() { playSfx('coin'); });
+      app.ports.playHurtSound.subscribe(function() { playSfx('hurt'); });
+
+      // Background music
+      var titleMusic = new Audio('assets/lola-titlescreen.mp3');
+      titleMusic.loop = true;
+      titleMusic.volume = 0.6;
+      var gameplayMusic = new Audio('assets/lola-quest-gameplay.mp3');
+      gameplayMusic.loop = true;
+      gameplayMusic.volume = 0.6;
+      var currentMusic = null;
+
+      function switchMusic(track) {
+        var next = null;
+        if (track === 'gameplay') {
+          next = gameplayMusic;
+        } else if (track === 'title') {
+          next = titleMusic;
+        } else {
+          return;
+        }
+        if (currentMusic === next) return;
+        if (currentMusic) {
+          currentMusic.pause();
+          currentMusic.currentTime = 0;
+        }
+        currentMusic = next;
+        currentMusic.currentTime = 0;
+        currentMusic.play().catch(function() {});
+      }
+
+      // Try to start title music immediately (will be blocked by autoplay policy
+      // until the user interacts with the page — that's expected).
+      titleMusic.play().catch(function() {});
+      currentMusic = titleMusic;
+
+      app.ports.playMusic.subscribe(function(track) {
+        switchMusic(track);
+      });
+
+      app.ports.setMuted.subscribe(function(muted) {
+        titleMusic.muted = muted;
+        gameplayMusic.muted = muted;
+        sfxMuted = muted;
+      });
+    })();
+  </script>
+</body>
+</html>
